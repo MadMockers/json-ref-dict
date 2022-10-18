@@ -208,6 +208,7 @@ class TestResolveURI:
             f"base/with-escaped-chars.json#/properties/{field}"
         )
         result = resolve_uri(uri)
+        print(result)
         assert result == {"type": "integer"}
 
 

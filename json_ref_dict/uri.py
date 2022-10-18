@@ -84,6 +84,10 @@ class URI(NamedTuple):
             uri_base=self.uri_base, uri_name=self.uri_name, pointer=pointer
         )
 
+    def contains(self, uri: "URI"):
+        """Return true if the provided URI is within the "directory" structure of this URI"""
+        return self.uri_base == uri.uri_base and self.uri_name == uri.uri_name and uri.pointer.startswith(self.pointer)
+
     def __repr__(self) -> str:
         """String representation of the URI."""
         return self.root + f"#{self.pointer}"

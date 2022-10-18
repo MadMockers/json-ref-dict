@@ -1,6 +1,6 @@
 from collections import abc
 from functools import lru_cache
-from typing import Any, Dict, List, NoReturn, Optional, Tuple, Union
+from typing import Any, Dict, List, NoReturn, Optional, Tuple, Union, Set
 from urllib.parse import unquote
 
 from jsonpointer import JsonPointer, JsonPointerException, _nothing
@@ -24,39 +24,6 @@ class RefPointer(JsonPointer):
         self.uri = URI.from_string(uri) if isinstance(uri, str) else uri
         super().__init__(self.uri.pointer)
 
-    def resolve_remote(
-        self, doc: Any, parts_idx: int
-    ) -> Tuple[bool, Optional[Any]]:
-        """Defer resolution of references to a new RefPointer.
-
-        :param doc: document element.
-        :param parts_idx: index of the reference part reached.
-        :return: tuple indicating (1) if doc was a ref and (2) what
-            that ref was.
-        """
-        remote_uri, value = self.resolve_remote_with_uri(doc, parts_idx)
-        return remote_uri is not None, value
-
-    def resolve_remote_with_uri(
-        self, doc: Any, parts_idx: int
-    ) -> Tuple[Optional[URI], Optional[Any]]:
-        """Defer resolution of references to a new RefPointer.
-
-        :param doc: document element.
-        :param parts_idx: index of the reference part reached.
-        :return: tuple indicating (1) if doc was a ref (the ref URI returned)
-            and (2) what that ref value was.
-        """
-        if not (
-            isinstance(doc, abc.Mapping) and isinstance(doc.get("$ref"), str)
-        ):
-            return None, None
-        remote_uri = self.uri.relative(doc["$ref"]).get(
-            *[parse_segment(part) for part in self.parts[parts_idx + 1 :]]
-        )
-
-        resolved_remote_uri, value = resolve_uri_to_urivalue_pair(remote_uri)
-        return resolved_remote_uri, value
 
     def resolve(self, doc: Any, default: Any = _nothing) -> Any:
         """Resolves the pointer against doc and returns the referenced object.
@@ -73,7 +40,7 @@ class RefPointer(JsonPointer):
         :raises JsonPointerException: if `default` is not set and pointer
             could not be resolved.
         """
-        _, value = self.resolve_with_uri(doc, default)
+        _, value = _resolve_itr(self.uri, default=default, doc=doc)
         return value
 
     get = resolve
@@ -95,25 +62,7 @@ class RefPointer(JsonPointer):
         :raises JsonPointerException: if `default` is not set and pointer
             could not be resolved.
         """
-        remote_uri, remote = self.resolve_remote_with_uri(doc, -1)
-        if remote_uri is not None:
-            return remote_uri, remote
-        for idx, part in enumerate(self.parts):
-            if not part:
-                continue
-            try:
-                try:
-                    doc = self.walk(doc, part)
-                except JsonPointerException:
-                    doc = self.walk(doc, unquote(part))
-                remote_uri, remote = self.resolve_remote_with_uri(doc, idx)
-                if remote_uri is not None:
-                    return remote_uri, remote
-            except JsonPointerException:
-                if default is _nothing:
-                    raise
-                return self.uri, default
-        return self.uri, doc
+        return _resolve_itr(self.uri, default=default, doc=doc)
 
     def set(self, doc: Any, value: Any, inplace: bool = True) -> NoReturn:
         """`RefPointer` is read-only."""
@@ -178,10 +127,7 @@ def resolve_uri_to_urivalue_pair(uri: URI) -> UriValuePair:
     :raises DocumentParseError: if the input URI root does not point to
         a valid document.
     """
-    document = _resolve_cached_root_doc(uri)
-    pointer = RefPointer(uri)
-    remote_uri, value = pointer.resolve_with_uri(document)
-    return remote_uri if remote_uri else uri, value
+    return _resolve_itr(uri)
 
 
 @nested_lru_cache([resolve_uri_to_urivalue_pair], maxsize=None)
@@ -190,5 +136,107 @@ def resolve_uri(uri: URI) -> ResolvedValue:
 
     Loads the document and resolves the pointer, bypassing refs.
     """
-    _, value = resolve_uri_to_urivalue_pair(uri)
+    #_, value = resolve_uri_to_urivalue_pair(uri)
+    #return value
+    _, value = _resolve_itr(uri)
     return value
+
+
+def _walker(doc: Any, uri: URI, parts: List[str]):
+
+    parts = [p for p in parts if p]
+
+    yield uri, parts, doc
+
+    for idx, part in enumerate(parts):
+        try:
+            uri = uri.get(parse_segment(part))
+            ref = RefPointer(uri)
+            try:
+                doc = ref.walk(doc, part)
+            except JsonPointerException:
+                doc = ref.walk(doc, unquote(part))
+
+            yield uri, parts[idx+1:], doc
+        except JsonPointerException as e:
+            yield uri, parts[idx+1:], e
+
+
+def _resolve_links(links: Dict[URI, URI], uri: URI, visited: Set[URI] = None):
+    if visited is None:
+        visited = set()
+
+    if uri in visited:
+        raise RuntimeError("Self reference")
+
+    if uri in links:
+        visited.add(uri)
+        return True, _resolve_links(links, links[uri], visited=visited)[1]
+    else:
+        return False, uri
+
+
+def _resolve_itr(uri: URI, doc: Any = None, default: Any = _nothing):
+    visited: Dict[URI, Any] = {}
+    links: Dict[URI, URI] = {}
+
+    if doc is None:
+        doc = _resolve_cached_root_doc(uri)
+
+    ref   = RefPointer(uri)
+    parts = ref.parts
+
+    uri   = uri.get("/")
+
+    skip = 0
+    while True:
+        for uri, remaining, doc in _walker(doc, uri, parts):
+            if isinstance(doc, JsonPointerException):
+                if default is _nothing:
+                    raise doc
+                else:
+                    return uri, default
+
+            if skip > 0:
+                skip -= 1
+                continue
+
+            prev = uri
+            uri_changed, uri = _resolve_links(links, uri)
+            if uri_changed:
+                doc   = visited[uri]
+                parts = remaining
+                break
+
+            if uri not in visited:
+                visited[uri] = doc
+
+            if isinstance(doc, abc.Mapping):
+                ref = doc.get("$ref")
+                if isinstance(ref, str):
+                    ref_uri    = uri.relative(ref)
+
+                    if uri.contains(ref_uri):
+                        # The reference we've come across is actually inside
+                        # the document we're currently looking at
+                        refp  = RefPointer(ref_uri)
+                        parts = refp.parts + remaining
+                        skip  = 1
+                        break
+
+                    else:
+                        links[uri] = ref_uri
+
+                        if ref_uri in visited:
+                            doc   = visited[ref_uri]
+                            uri   = ref_uri
+                            parts = remaining
+                        else:
+                            doc   = _resolve_cached_root_doc(ref_uri)
+                            uri   = ref_uri.get("/")
+                            refp  = RefPointer(ref_uri)
+                            parts = refp.parts + remaining
+                    break
+
+            if len(remaining) == 0:
+                return uri, doc
