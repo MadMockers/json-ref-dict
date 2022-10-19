@@ -19,9 +19,12 @@ class RefDict(UserDict):  # pylint: disable=too-many-ancestors
     nested items.
     """
 
-    def __init__(self, uri: Union[str, URI], *args, **kwargs):
+    def __init__(self, uri: Union[str, URI], *args, value: Any = None, **kwargs):
         """On instantiation, retrieve the data from the URI."""
-        self.uri, value = _resolve_uri(uri)
+        if value is None:
+            self.uri, value = _resolve_uri(uri)
+        else:
+            self.uri = uri
         if not isinstance(value, dict):
             raise TypeError(
                 f"The value at '{uri}' is not an object. Got '{value}'."
@@ -45,9 +48,9 @@ class RefDict(UserDict):  # pylint: disable=too-many-ancestors
         """
         uri, value = _resolve_uri(uri)
         if isinstance(value, dict):
-            return RefDict(uri)
+            return RefDict(uri, value=value)
         if isinstance(value, list):
-            return RefList(uri)
+            return RefList(uri, value=value)
         return value
 
 
@@ -59,9 +62,13 @@ class RefList(UserList):  # pylint: disable=too-many-ancestors
     nested items.
     """
 
-    def __init__(self, uri: Union[str, URI], *args, **kwargs):
+    def __init__(self, uri: Union[str, URI], *args, value: Any = None, **kwargs):
         """On instantiation, retrieve the data from the URI."""
-        self.uri, value = _resolve_uri(uri)
+        if value is None:
+            self.uri, value = _resolve_uri(uri)
+        else:
+            self.uri = uri
+
         if not isinstance(value, list):
             raise TypeError(
                 f"The value at '{uri}' is not an array. Got '{value}'."
